@@ -73,8 +73,19 @@ fn exchange(c: &Config, bytes: &[u8]) -> Result<u8> {
     let mut s = UnixStream::connect(&c.darksignal_socket)?;
     s.set_write_timeout(Some(Duration::from_secs(2)))?;
     s.set_read_timeout(Some(Duration::from_secs(2)))?;
+    Ok(write_and_read_ack(&mut s, bytes)?)
+}
+/// Darksignal frames are length-prefixed, so it can read the frame, ack and
+/// shut the connection down before our `shutdown(Write)`. BSD then answers
+/// that shutdown with `ENOTCONN` while the ack byte is still readable, so that
+/// error must not discard the ack: an accepted frame would be resent and a
+/// permanent refusal retried.
+fn write_and_read_ack(s: &mut UnixStream, bytes: &[u8]) -> std::io::Result<u8> {
     s.write_all(bytes)?;
-    s.shutdown(std::net::Shutdown::Write)?;
+    match s.shutdown(std::net::Shutdown::Write) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotConnected => return Err(e),
+        _ => {}
+    }
     let mut ack = [0];
     s.read_exact(&mut ack)?;
     Ok(ack[0])
@@ -90,5 +101,26 @@ pub fn send(c: &Config, body: &Value) -> Ack {
     match exchange(c, &bytes) {
         Ok(b) => decode(b),
         Err(e) => Ack::Retry(Retry::Transport(e.to_string())),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ack_survives_peer_closing_before_our_shutdown() {
+        for want in [ACK_ACCEPTED, ACK_REFUSED, ACK_RETRY] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            // The whole frame is already written; the peer reads it, acks and
+            // shuts down before write_and_read_ack reaches shutdown(Write).
+            client.write_all(&[7u8; 16]).unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut got = [0u8; 16];
+                server.read_exact(&mut got).unwrap();
+                server.write_all(&[want]).unwrap();
+                server.shutdown(std::net::Shutdown::Both).unwrap();
+            });
+            peer.join().unwrap();
+            assert_eq!(write_and_read_ack(&mut client, &[]).unwrap(), want);
+        }
     }
 }
