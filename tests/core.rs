@@ -526,6 +526,7 @@ fn cli(cfg: &Config, args: &[&str]) -> std::process::Output {
         .arg("--config")
         .arg(&path)
         .args(&args[1..])
+        .arg("--json")
         .output()
         .unwrap()
 }
@@ -578,7 +579,11 @@ fn requeue_refused_cli_flags_exit_codes_and_writer_lock() {
     );
     assert_eq!(o.status.code(), Some(2), "{o:?}");
     let out: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
-    assert_eq!(out, json!({"requeued":1,"not_requeued":[unknown]}));
+    assert_eq!(out["kind"], "darkapple.requeue_refused");
+    assert_eq!(
+        (&out["requeued"], &out["not_requeued"]),
+        (&json!(1), &json!([unknown]))
+    );
     assert!(String::from_utf8_lossy(&o.stderr).contains(unknown));
     // A no-longer-refused id is reported too.
     let o = cli(&cfg, &["requeue-refused", "--event-id", &eids[0]]);
@@ -587,7 +592,11 @@ fn requeue_refused_cli_flags_exit_codes_and_writer_lock() {
     let o = cli(&cfg, &["requeue-refused", "--all"]);
     assert_eq!(o.status.code(), Some(0), "{o:?}");
     let out: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
-    assert_eq!(out, json!({"requeued":1,"not_requeued":[]}));
+    assert_eq!(out["kind"], "darkapple.requeue_refused");
+    assert_eq!(
+        (&out["requeued"], &out["not_requeued"]),
+        (&json!(1), &json!([]))
+    );
     let st: serde_json::Value = serde_json::from_slice(&cli(&cfg, &["status"]).stdout).unwrap();
     assert_eq!(st["store"]["pending"], 2);
     assert_eq!(st["store"]["counters"]["requeued"], 2);

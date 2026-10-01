@@ -116,8 +116,8 @@ deduplicates a record it had already handled. Name records with one or more
 row with `--all`; one of the two is required and they cannot be combined. Rows
 in any other state are never touched. It runs in one transaction under the
 exclusive writer lock, so it refuses (exit 2) while `run`, `ship` or another
-writer holds the state directory. It prints
-`{"requeued":N,"not_requeued":[...]}` and updates `status.json` (counter
+writer holds the state directory. It reports the requeued count and the IDs
+not requeued (`--json`: `"requeued":N,"not_requeued":[...]` in the envelope) and updates `status.json` (counter
 `requeued`). Exit 0: every named ID was requeued (or `--all`). Exit 2: an
 event ID was unknown or not in state `refused` (listed on stderr), or an
 error.
@@ -136,10 +136,57 @@ specific records) and start it again; do not edit `events.db` by hand.
 If the delivery thread fails, `run` records `delivery` coverage as unavailable,
 counts `worker_failures` and exits 2.
 
-`status` reads the last published snapshot even while the daemon is running.
-Always check `updated_at_ms`; a stopped process cannot update its status. Exit
-2 indicates configuration, I/O, delivery or validation failure, with stderr
-explaining the reason.
+`status` reads the last published snapshot even while the daemon is running
+(it never takes the writer lock) and reports `stale` when `updated_at_ms` is
+older than 3 x `interval_seconds`, missing, or that far in the future; a
+stopped process cannot update its status. Exit 2 indicates configuration, I/O,
+delivery or validation failure, with stderr explaining the reason.
+
+## CLI output and exit codes
+
+Darkapple follows the suite [output contract](docs/output-contract.md). Every
+command prints human text by default; `--json` (alias `--format json`, also
+accepted before the command) prints exactly one compact JSON line on stdout
+that starts with the envelope
+`{"schema_version":1,"kind":"darkapple.<command>","tool":"darkapple","tool_version":"0.1.0",...}`
+followed by the command's payload. No command is machine-primary. `run` is a
+daemon: it writes nothing to stdout and publishes the envelope to
+`status.json` instead. Diagnostics (refusal and retry explanations) always go
+to stderr as text lines.
+
+| Command | Default | `kind` | Exit codes |
+| --- | --- | --- | --- |
+| `version` (also `--version`) | human | `darkapple.version` | 0; 2 failure |
+| `check` | human | `darkapple.check` | 0; 2 failure |
+| `once` | human | `darkapple.once` | 0; 2 failure |
+| `run` | daemon (no stdout) | `darkapple.status` in `status.json` | 0 clean shutdown; 2 failure, including a delivery-worker failure |
+| `status` | human | `darkapple.status` (+ `stale`, `stale_after_ms`, `age_ms`) | 0; 2 failure (for example no `status.json` yet) |
+| `replay` | human | `darkapple.replay` (+ `replayed`) | 0; 2 failure |
+| `ship` | human | `darkapple.ship` (+ `tally`) | 0 all due records accepted; 2 retained for retry, or failure; 3 permanently refused |
+| `requeue-refused` | human | `darkapple.requeue_refused` | 0 all named IDs requeued (or `--all`); 2 an ID not requeued, or failure |
+| `help`, `-h`, `--help` (any command) | human | none | 0 |
+
+Existing payload fields keep their names; `status` keeps
+`"schema":"darkapple.status.v1"` as an extra field. A `ship` exit 2/3 and a
+`requeue-refused` exit 2 with unrequeued IDs are delivery outcomes, not
+errors: the envelope still goes to stdout and the reason to stderr.
+
+Errors: in text mode one stderr line `darkapple: <message>`. With `--json`
+every failure, including usage errors, writes one JSON line to stderr and
+nothing to stdout:
+`{"schema_version":1,"kind":"error","tool":"darkapple","command":"<command or null>","category":"usage|config|io|internal","message":"...","exit_code":2}`.
+Control and bidi characters in messages are escaped.
+
+Every failure exits 2. The suite contract assigns 1 to runtime failures and 2
+to usage/configuration errors; darkapple's documented and tested 2 for every
+failure is kept and not renumbered, as are `ship`'s 2 (retained) and 3
+(refused).
+
+Status file: `STATE_DIR/status.json` (0600, written atomically via
+`status.tmp` + rename), published by `run` every `interval_seconds` (at most
+30) and on shutdown, and by `replay`, `ship` and `requeue-refused` after they
+change state. It carries the envelope with `kind` `darkapple.status`, plus
+`schema`, `host`, `updated_at_ms`, `store`, `coverage` and `delivery`.
 
 The JSON config rejects unknown fields. Paths must be absolute, without `..`.
 Use canonical `/private/tmp` rather than `/tmp` for a local lab. Config must be

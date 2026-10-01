@@ -29,7 +29,8 @@ def write(p,value):
     p.write_text(json.dumps(value));p.chmod(0o600)
 
 def run(*args,code=0,binary=None):
-    p=subprocess.run([str(binary or APPLE),*map(str,args)],capture_output=True,text=True,timeout=20)
+    # Every darkapple call asks for the JSON envelope (default output is human text).
+    p=subprocess.run([str(binary or APPLE),*map(str,args),'--json'],capture_output=True,text=True,timeout=20)
     if code is not None: assert p.returncode==code,(p.returncode,code,p.stderr)
     return p
 
@@ -65,8 +66,15 @@ def records(state):
 def sql(state,query,*args):
     db=sqlite3.connect(state/'events.db');db.execute(query,args);db.commit();db.close()
 
+def envelope(p,kind):
+    v=json.loads(p.stdout)
+    assert (v['schema_version'],v['kind'],v['tool'])==(1,'darkapple.'+kind,'darkapple'),v
+    return v
+
 def status(config):
-    return json.loads(run('status','--config',config).stdout)['store']
+    v=envelope(run('status','--config',config),'status')
+    assert v['schema']=='darkapple.status.v1' and isinstance(v['stale'],bool),v
+    return v['store']
 
 def observation(pid,exe):
     return json.dumps({'source':'process','kind':'process.observed','observed_at_ms':1780000000000,'pid':pid,'start_us':1234567,'exe':exe,'value':'present'})+'\n'
@@ -135,14 +143,15 @@ with tempfile.TemporaryDirectory(prefix='darkapple-e2e-',dir='/private/tmp') as 
         assert not [i for path,b in received if path=='/v1/darksignal/darkapple' for i in b['signals'] if i['rule']!='ipc.peer_mismatch'],received
         # requeue-refused needs an explicit selector and reports ids it did not requeue.
         p=run('requeue-refused','--config',root/'apple.json',code=2)
-        assert 'requires --event-id' in p.stderr,p.stderr
+        err=json.loads(p.stderr)
+        assert p.stdout=='' and (err['kind'],err['category'],err['exit_code'])==('error','usage',2) and 'requires --event-id' in err['message'],p.stderr
         p=run('requeue-refused','--config',root/'apple.json','--event-id',after[1][3]['event_id'],code=2)
-        assert json.loads(p.stdout)=={'requeued':0,'not_requeued':[after[1][3]['event_id']]},p.stdout
+        v=envelope(p,'requeue_refused');assert (v['requeued'],v['not_requeued'])==(0,[after[1][3]['event_id']]),p.stdout
         assert [s for _,s,_,_ in records(state)]==['refused','pending','pending']
         # Operator recovery after switching back to the correct binary: requeue the
         # retained evidence, then one ship delivers everything.
         p=run('requeue-refused','--config',root/'apple.json','--all')
-        assert json.loads(p.stdout)=={'requeued':1,'not_requeued':[]},p.stdout
+        v=envelope(p,'requeue_refused');assert (v['requeued'],v['not_requeued'])==(1,[]),p.stdout
         r=records(state);assert (r[0][1],r[0][2],r[0][3])==('pending',0,original),r[0]
         st=status(root/'apple.json');assert (st['pending'],st['refused'],st['counters']['requeued'])==(3,0,1),st
         time.sleep(2.1)
@@ -222,7 +231,7 @@ with tempfile.TemporaryDirectory(prefix='darkapple-e2e-',dir='/private/tmp') as 
     assert daemon.returncode==0,(daemon.returncode,err)
     assert fake.bodies and all(b['schema']=='darkapple.health.v1' for b in fake.bodies),fake.bodies
     assert 'REFUSED a health frame' in err,err
-    st=json.loads(run('status','--config',run_cfg).stdout)['store']
+    st=envelope(run('status','--config',run_cfg),'status')['store']
     assert st['counters']['health_refused']>=1 and 'refused' not in st['counters'] and st['refused']==0,st
     assert all(s=='pending' and a==0 for _,s,a,_ in records(run_state))
     print('PASS: run mode keeps events pending when the health frame is refused; requeue-refused refuses while run holds the writer lock')

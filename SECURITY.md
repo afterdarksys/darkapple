@@ -182,8 +182,9 @@ removes it. Protect exported artifacts separately.
   event_id.
 - Collection and shipment run separately. Full storage still limits collection;
   loss counters and queue depth must be monitored.
-- `status.json` is a snapshot: check its update time. An old healthy snapshot
-  does not prove the agent is currently running.
+- `status.json` is a snapshot: check its update time (`darkapple status`
+  reports `stale` past 3 x `interval_seconds`). An old healthy snapshot does
+  not prove the agent is currently running.
 - Darksignal reports Darkapple, in its heartbeat's `producers.darkapple`
   entry, as available/degraded after authenticated health,
   silent after 90 seconds without health (or a backward receiver clock), and

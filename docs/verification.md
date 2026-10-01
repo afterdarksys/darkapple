@@ -72,3 +72,27 @@ counting unattempted records, not resetting attempts, requeueing rows in any
 state, skipping event-ID validation, not counting `requeued`, accepting
 `--all` with `--event-id`, exit 0 for unrequeued IDs, and bypassing the writer
 lock each made a test fail.
+
+## CLI output contract — 2026-10-01
+
+Same host and toolchain, Darksignal d573028. See
+[the output contract](output-contract.md) and the README section
+"CLI output and exit codes".
+
+| Check | Result |
+| --- | --- |
+| Darkapple Rust tests (`cargo test --locked`) | 27 passed (1 unit, 26 integration; `tests/cli.rs` adds 5) |
+| Clippy, all targets and features, warnings denied; rustfmt check; `cargo deny check` | Passed |
+| `scripts/test-swift.sh` | Passed |
+| `scripts/test-integration.py` against Darksignal d573028 (all calls with `--json`) | Passed |
+| `scripts/test-live.py` (status file carries the envelope) | Passed |
+| Every subcommand with `--json`, including `run` as a daemon (no stdout, envelope in `status.json`): one line, envelope fields first, documented exit code | Passed |
+| JSON errors (usage, config, io): one stderr line with the six fields, empty stdout, exit 2; control and bidi characters escaped | Passed |
+| `status --json` while a writer holds the lock; `stale` for old, future and missing `updated_at_ms` | Passed |
+| `--help`/`-h`/`help` on the binary and every command: exit 0, every command and its exit codes listed | Passed |
+
+Mutation checks: stdout envelope omitted, `status.json` envelope omitted, JSON
+error written to stdout, JSON mode ignored for errors, `schema_version`
+dropped from the error, failure exit code 1 instead of 2, `ship` always
+exiting 0, and staleness ignoring future/missing timestamps each made a test
+fail.

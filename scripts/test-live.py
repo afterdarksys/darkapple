@@ -17,6 +17,7 @@ with tempfile.TemporaryDirectory(prefix='darkapple-live-',dir='/private/tmp') as
                 if result['store']['counters'].get('health_transport_errors',0)>0: break
             time.sleep(.2)
         else: raise AssertionError('No collection/failed-delivery status before deadline')
+        assert (result['schema_version'],result['kind'],result['schema'])==(1,'darkapple.status','darkapple.status.v1'),result
         assert result['store']['records']>0
         assert result['coverage']['endpoint_security']['status']=='unavailable'
         p.terminate();out,err=p.communicate(timeout=10)
