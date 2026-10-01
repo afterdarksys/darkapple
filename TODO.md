@@ -35,9 +35,10 @@ See [README.md](README.md) for implemented behavior,
 
 - [ ] Restart failed or stalled Endpoint Security helpers with bounded backoff;
   handle permission changes without requiring a manual daemon restart.
-- [ ] Add a versioned Darksignal acknowledgement protocol that distinguishes
-  retryable capacity/storage errors from permanent rejection. Preserve
-  compatibility with existing producers and retain rejected evidence visibly.
+- [x] Darksignal acknowledgement distinguishes retryable (`0x02`) from
+  permanent (`0x00`) failure; Darkapple keeps refused evidence visibly in the
+  journal (`refused` state and counters). `ship` stops at the first refusal;
+  `requeue-refused` (named event IDs or `--all`) is the operator recovery.
 - [ ] Exercise disk-full, database corruption, abrupt power loss, clock jumps,
   prolonged outages, event bursts and sustained workloads. Set measured CPU,
   memory, disk and recovery targets before claiming fleet capacity.

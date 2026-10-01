@@ -6,5 +6,6 @@
   "capacity": 10000,
   "retention_days": 7,
   "endpoint_helper": "/Applications/Darkapple.app/Contents/Helpers/EndpointSensor.app/Contents/MacOS/EndpointSensor",
-  "launch_dirs": ["/Library/LaunchAgents", "/Library/LaunchDaemons"]
+  "launch_dirs": ["/Library/LaunchAgents", "/Library/LaunchDaemons"],
+  "hidden_dir_allowlist": [".bun", ".cargo", ".docker", ".local", ".npm", ".nvm", ".pyenv", ".rustup", ".vscode"]
 }

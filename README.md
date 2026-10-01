@@ -32,11 +32,16 @@ Silicon runtime qualification is still required.
   writer lock; stable event IDs across retries. Pending events are not evicted.
   Full capacity counts loss. Completed journal rows can expire or be evicted.
 - A separate delivery thread, length-prefixed Unix IPC, bounded I/O, exponential
-  per-record backoff capped at five minutes. ACK 0 and transport failure retain
-  the original event. ACK 1 means handled by Darksignal, not delivered upstream.
+  per-record backoff capped at five minutes. ACK `0x02`, an unknown byte and any
+  transport failure retain the original event for retry. ACK `0x00` is a
+  permanent refusal: the record moves to the `refused` state, stays in the
+  journal as evidence, is counted and logged, and is never resent unless an
+  operator runs `requeue-refused`. ACK `0x01` means handled by Darksignal, not
+  delivered upstream. See [the protocol](docs/protocol.md#acknowledgement).
 - Explicit source coverage and delivery counters in `status.json`. Darksignal
   records authenticated Darkapple health and includes available/degraded/silent/
-  unseen status in its own heartbeat. Silence threshold is 90 seconds.
+  unseen status in its heartbeat's `producers.darkapple` entry. Silence
+  threshold is 90 seconds.
 - First-class `darkapple` Darksignal producer, fixed rule classification, event
   source references, dedupe, standard entity joins and `/v1/darksignal/darkapple`.
 
@@ -46,7 +51,9 @@ Use the pinned rustup toolchain; Homebrew cargo may shadow it.
 
 ```sh
 rustup run 1.97.1 cargo test --locked
-rustup run 1.97.1 cargo clippy --locked --all-targets -- -D warnings
+rustup run 1.97.1 cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo deny check
+bash scripts/test-swift.sh
 bash scripts/build-macos.sh
 DARKSIGNAL_BINARY=../darksignal/target/debug/darksignal python3 scripts/test-integration.py
 python3 scripts/test-integration.py --bundle
@@ -54,9 +61,17 @@ python3 scripts/test-live.py
 ```
 
 The integration test runs the actual binaries against local Unix and HTTP
-listeners. It tests wrong-executable refusal, socket outage/restart, retained
-record identity, classification, deduplication and the outgoing HTTP payload.
-It never uses the configured production API or its credentials.
+listeners. It tests wrong-executable and unknown-rule refusal by the real
+Darksignal (`0x00`, record kept as `refused`, exit 3, `ship` stops and leaves
+the rest pending), `requeue-refused` recovery and its writer-lock refusal while
+`run` is active, `0x02`/unknown-byte/
+no-byte retention against a scripted socket (exit 2), socket outage/restart,
+retained record identity, the `run` health-frame guard, classification,
+deduplication and the outgoing HTTP payload. It never uses the configured
+production API or its credentials. `scripts/test-swift.sh` typechecks the Swift
+sources and runs the helper's output-loss test without Endpoint Security.
+CI (`.github/workflows/ci.yml`) runs formatting, Clippy, tests, cargo-deny,
+gitleaks and the Swift check on macOS.
 
 `build/Darkapple.app` is an ad-hoc-signed development bundle. It contains
 `darkappled` (the CLI is named `darkapple` outside the app), `darksignal`, the Swift application, the embedded EndpointSensor
@@ -73,15 +88,53 @@ darkapple run --config /absolute/path/config.json
 darkapple status --config /absolute/path/config.json
 darkapple replay --config /absolute/path/config.json --input fixtures/observations.jsonl
 darkapple ship --config /absolute/path/config.json
+darkapple requeue-refused --config /absolute/path/config.json --event-id ID [--event-id ID ...]
+darkapple requeue-refused --config /absolute/path/config.json --all
 ```
 
 `check` validates configuration and helper-path trust without collecting,
 creating state or sending. `once` collects and journals without shipment.
 `run` collects continuously and ships independently. `replay` is an explicit
 fixture/import operation, not live evidence; it validates all input before
-inserting. `ship` attempts up to 32 currently due records; exit 2 means some
-attempts failed/refused and were retained. Records still in backoff are not
-attempted; inspect `pending` rather than treating exit 0 as a drained queue.
+inserting. `ship` sends up to 32 currently due records in order and stops at
+the first one that is not accepted; the later due records stay pending and
+unattempted (not sent, attempts and backoff unchanged) and stderr reports how
+many. Stopping matters because `ship` sends no health frame and Darksignal
+answers `0x00` to a wrong producer executable or uid exactly as to a bad
+record: a misconfigured `ship` refuses at most one record per run instead of
+the whole queue. Exit 0: every due record was accepted. Exit 3: a record was
+permanently refused (`0x00`) and moved to state `refused`. Exit 2: a record was
+retained for retry (`0x02` or transport failure), or another error. Records
+still in backoff are not attempted; inspect `pending` rather than treating
+exit 0 as a drained queue.
+
+`requeue-refused` is the operator recovery for refused records. It moves the
+matching `refused` rows back to `pending` with attempts reset and due
+immediately, keeping the stored event and its `event_id`, so Darksignal still
+deduplicates a record it had already handled. Name records with one or more
+`--event-id` (canonical lowercase UUIDs, at most 256), or requeue every refused
+row with `--all`; one of the two is required and they cannot be combined. Rows
+in any other state are never touched. It runs in one transaction under the
+exclusive writer lock, so it refuses (exit 2) while `run`, `ship` or another
+writer holds the state directory. It prints
+`{"requeued":N,"not_requeued":[...]}` and updates `status.json` (counter
+`requeued`). Exit 0: every named ID was requeued (or `--all`). Exit 2: an
+event ID was unknown or not in state `refused` (listed on stderr), or an
+error.
+
+`status.json` reports `store.pending`, `store.refused` (rows kept as refused
+evidence) and counters including `acknowledged`, `refused`, `retried`,
+`transport_errors`, `requeued`, `refused_evicted`, `refused_expired`, `lost`, the
+`health_*` counters and `worker_failures`. Refused rows are terminal like
+completed rows: they expire after `retention_days`, and when the journal is
+full the oldest completed row is evicted first, then the oldest refused row.
+Both are counted. Pending rows are never evicted. A refusal is usually a
+configuration fault (wrong host, uid or executable in Darksignal's producer
+config). After fixing it, stop the daemon, requeue the retained evidence with
+`darkapple requeue-refused --config PATH --all` (or `--event-id ID` for
+specific records) and start it again; do not edit `events.db` by hand.
+If the delivery thread fails, `run` records `delivery` coverage as unavailable,
+counts `worker_failures` and exits 2.
 
 `status` reads the last published snapshot even while the daemon is running.
 Always check `updated_at_ms`; a stopped process cannot update its status. Exit
@@ -94,6 +147,15 @@ owned by the service uid and not group/world writable. State directory is
 0700; state files are 0600. The parent directory must exist. Only root or the
 service uid may own trusted helper/socket ancestors; writable non-sticky
 ancestors are refused. A configured helper must be an executable regular file.
+
+`hidden_dir_allowlist` (optional) lists dot-directory names directly under a
+user home (`/Users/<name>/`, never `/Users/Shared`) whose executables do not
+raise `macos.process.hidden_executable`. The default is `.bun`, `.cargo`,
+`.docker`, `.local`, `.npm`, `.nvm`, `.pyenv`, `.rustup`, `.vscode`. Only the
+first hidden component is excused: `~/.cargo/.x/tool` still fires, as do
+`/opt/.cache/...`, `/tmp/.x` (temporary-executable rule) and `~/.anything-else`.
+Each entry is one component starting with `.` (at most 64 entries of 64
+bytes); `[]` disables the exception.
 
 See [the example](deploy/config.example.json). Set `endpoint_helper` to `null`
 for polling-only operation. Per-user launch agents require explicitly adding
@@ -109,10 +171,9 @@ match Darksignal's configuration. Both bundled daemons run as root in this
 version because Endpoint Security requires it; unprivileged polling is also
 supported with a configuration owned by that uid.
 
-The sibling Darksignal change is also retained as
-[integration/darksignal.patch](integration/darksignal.patch) for review and
-application to compatible checkouts. Do not apply it twice. Darksignal's
-existing nocved, aftercve and cveguard schemas remain supported.
+Darksignal main already contains the darkapple producer (tool, classifier,
+health tracking and the 3-way ack); no patch is needed. Darksignal's existing
+nocved, aftercve and cveguard schemas remain supported.
 
 No new direct cveguard enforcement or nocve-store event-chain format is
 introduced. AfterCVE can investigate the host independently; the local

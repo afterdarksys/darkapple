@@ -10,6 +10,30 @@ use std::{
     time::Duration,
 };
 pub const MAX_FRAME: usize = 65_536;
+pub const ACK_REFUSED: u8 = 0x00;
+pub const ACK_ACCEPTED: u8 = 0x01;
+pub const ACK_RETRY: u8 = 0x02;
+/// Darksignal's one-byte answer to a frame (darksignal DESIGN.md, Socket).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ack {
+    /// `0x01`: stored, a duplicate, stored after eviction, or classified as
+    /// not a signal. Handled locally by Darksignal; not proof of upstream delivery.
+    Accepted,
+    /// `0x00`: permanent refusal, the producer's fault. Resending the same
+    /// bytes can never succeed, so the record leaves the outbox.
+    Refused,
+    /// Transient: keep the record and resend after backoff.
+    Retry(Retry),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retry {
+    /// Explicit `0x02` from Darksignal (peer identity unreadable, queue full,
+    /// store error, socket setup failure).
+    Ack,
+    /// No byte, an unknown byte, I/O error, timeout or an untrusted/missing
+    /// socket. Treated exactly like `0x02`.
+    Transport(String),
+}
 pub fn frame(host: &str, body: &Value) -> Result<Vec<u8>> {
     let b = serde_json::to_vec(
         &json!({"v":1,"tool":"darkapple","host":host,"sent_at_ms":crate::now_ms(),"body":body}),
@@ -36,20 +60,35 @@ fn check_socket(p: &Path) -> Result<()> {
     }
     Ok(())
 }
-/// True = ACK 1 (handled, not proof of remote delivery); false = retained refusal.
-pub fn send(c: &Config, body: &Value) -> Result<bool> {
+pub fn decode(byte: u8) -> Ack {
+    match byte {
+        ACK_ACCEPTED => Ack::Accepted,
+        ACK_REFUSED => Ack::Refused,
+        ACK_RETRY => Ack::Retry(Retry::Ack),
+        other => Ack::Retry(Retry::Transport(format!("unknown ack byte {other:#04x}"))),
+    }
+}
+fn exchange(c: &Config, bytes: &[u8]) -> Result<u8> {
     check_socket(&c.darksignal_socket)?;
-    let bytes = frame(&c.host, body)?;
     let mut s = UnixStream::connect(&c.darksignal_socket)?;
     s.set_write_timeout(Some(Duration::from_secs(2)))?;
     s.set_read_timeout(Some(Duration::from_secs(2)))?;
-    s.write_all(&bytes)?;
+    s.write_all(bytes)?;
     s.shutdown(std::net::Shutdown::Write)?;
     let mut ack = [0];
     s.read_exact(&mut ack)?;
-    match ack[0] {
-        1 => Ok(true),
-        0 => Ok(false),
-        _ => Err("invalid acknowledgement".into()),
+    Ok(ack[0])
+}
+/// Sends one body. Never returns an error: every failure maps to an [`Ack`].
+/// A body whose frame exceeds 64 KiB can never be accepted, so it is
+/// [`Ack::Refused`] without connecting (Darksignal would answer `0x00`).
+pub fn send(c: &Config, body: &Value) -> Ack {
+    let bytes = match frame(&c.host, body) {
+        Ok(b) => b,
+        Err(_) => return Ack::Refused,
+    };
+    match exchange(c, &bytes) {
+        Ok(b) => decode(b),
+        Err(e) => Ack::Retry(Retry::Transport(e.to_string())),
     }
 }

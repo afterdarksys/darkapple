@@ -4,21 +4,7 @@ import Darwin
 
 // No AUTH subscriptions: this sensor never blocks execution or filesystem work.
 // Copy only bounded metadata during the callback; never retain borrowed ES pointers.
-let writer = DispatchQueue(label: "com.afterdark.darkapple.endpoint-writer")
-let slots = DispatchSemaphore(value: 512)
-let lossLock = NSLock()
-var dropped: UInt64 = 0
-func emit(_ object: [String: Any]) {
-    guard slots.wait(timeout: .now()) == .success else {
-        lossLock.lock(); dropped &+= 1; lossLock.unlock(); return
-    }
-    writer.async {
-        defer { slots.signal() }
-        guard var data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), data.count < 65536 else { return }
-        data.append(10)
-        do { try FileHandle.standardOutput.write(contentsOf: data) } catch { exit(74) }
-    }
-}
+// Bounded, counted output lives in Emit.swift.
 func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 func health(_ status: String, _ detail: String) { emit(["type":"health", "status":status, "detail":detail]) }
 func token(_ t: es_string_token_t) -> String {
@@ -73,9 +59,9 @@ health("available", "NOTIFY exec/fork/exit; no authorization or file-event subsc
 let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
 timer.schedule(deadline: .now() + 15, repeating: 15)
 timer.setEventHandler {
-    lossLock.lock(); let count = dropped; dropped = 0; lossLock.unlock()
+    lossLock.lock(); let count = dropped; dropped = 0; let failures = encodeFailures; lossLock.unlock()
     if count > 0 { loss(count, now()) }
-    health("available", "NOTIFY exec/fork/exit")
+    health("available", failures > 0 ? "NOTIFY exec/fork/exit; encode_failures=\(failures)" : "NOTIFY exec/fork/exit")
 }
 timer.resume()
 signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)

@@ -155,8 +155,10 @@ validated. Trusted ancestor checks allow sticky directories such as
 
 The journal is **not encrypted by Darkapple and is not a cryptographically
 chained off-host evidence store**. Root can read, modify or delete it. Completed
-rows can be evicted or expire; pending rows remain until acknowledged and can
-fill capacity. Export evidence needed for an investigation before retention
+rows can be evicted or expire; pending rows remain until acknowledged or
+refused and can fill capacity. Refused rows (ACK `0x00`) are kept as evidence
+and follow the completed-row rules: they expire after `retention_days` and are
+evicted (after completed rows) when the journal is full, with both counted. Export evidence needed for an investigation before retention
 removes it. Protect exported artifacts separately.
 
 ## Delivery and health semantics
@@ -166,14 +168,24 @@ removes it. Protect exported artifacts separately.
 - ACK `1` means local handling. For an event this may be queue insertion or
   deduplication; for health it updates producer status without a threat signal.
   It does not prove remote storage, operator notification or evidence archival.
-- ACK `0`, unexpected replies and transport failures leave events available for
-  retry. Refusal currently cannot distinguish temporary capacity/storage failure
-  from permanent invalid input.
+- ACK `0x02` (Darksignal-side transient failure), unexpected bytes, a missing
+  reply and transport failures leave events pending for retry with backoff.
+- ACK `0x00` is a permanent refusal (bad frame, wrong host or tool, classifier
+  error, peer uid/exe mismatch). The record leaves the outbox for the
+  `refused` state, is never resent and never blocks later deliveries; it is
+  counted in `status.json` and logged with its event_id and rule only. In `run`,
+  a refused health frame (sent first) stops that batch so a misconfigured
+  producer identity does not refuse the events one by one; `ship`, which sends
+  no health frame, stops at the first refusal for the same reason. Only an
+  explicit operator `requeue-refused` (named event IDs or `--all`, under the
+  writer lock) returns refused rows to the outbox, with their original
+  event_id.
 - Collection and shipment run separately. Full storage still limits collection;
   loss counters and queue depth must be monitored.
 - `status.json` is a snapshot: check its update time. An old healthy snapshot
   does not prove the agent is currently running.
-- Darksignal reports Darkapple as available/degraded after authenticated health,
+- Darksignal reports Darkapple, in its heartbeat's `producers.darkapple`
+  entry, as available/degraded after authenticated health,
   silent after 90 seconds without health (or a backward receiver clock), and
   unseen before the first health frame. Unseen does not alone establish that
   Darkapple was expected on that host. Backend silence alerts are future work.

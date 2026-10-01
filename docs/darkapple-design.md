@@ -40,9 +40,11 @@ Before implementation, pin:
 
 - The initial rules and severities, including coverage-loss behavior.
 - Entity extraction and event-ID deduplication/source references.
-- Refusal handling: bounded retry while retaining the record, with separately
-  counted connection errors, refusals and acknowledgements. Exhaustion leaves
-  a visible retained failure rather than silently advancing a cursor.
+- Refusal handling: the 3-way ack. `0x02` and transport failures keep the
+  record with bounded backoff; `0x00` moves it to a terminal, counted and
+  logged `refused` state kept in the journal, never a silent cursor advance.
+  Connection errors, retries, refusals and acknowledgements are counted
+  separately.
 - Local health versus signal traffic. Do not manufacture threat signals from
   normal health messages; add explicit per-producer liveness tracking.
 - The darkapi route `/v1/darksignal/darkapple` and its receiver requirements.

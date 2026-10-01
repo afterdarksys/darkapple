@@ -67,8 +67,9 @@ Source: [frame.rs](../../darksignal/src/frame.rs),
 - ACK `0x01` means accepted **or intentionally dropped** (for example an
   unrecognized rule or informational event), including successful deduplication.
   It does not prove a signal was stored or delivered to darkapi.
-- ACK `0x00` covers invalid input, authorization mismatch, full queue, and
-  storage failure. It does not distinguish permanent from retryable failure.
+- ACK `0x00` is a permanent refusal (invalid input, authorization mismatch,
+  classifier error). ACK `0x02` (added since this review) is transient: peer
+  identity unreadable, full queue, storage failure.
 - Classification emits at most one signal per submission, using fixed tables
   and producer-specific fallbacks. Adding an enum variant alone is insufficient.
 - Pending queue cap is 10,000; lower-ranked non-breach rows may be evicted.
@@ -90,11 +91,10 @@ Source: [frame.rs](../../darksignal/src/frame.rs),
 3. **Transport ACK is not archival confirmation.** Keep raw observations and
    source coverage separately. Test the queued signal and HTTP payload, not
    just ACK `1`. Never describe local acceptance as remote delivery.
-4. **Refusal needs a deliberate retention policy.** Existing guard and store
-   forwarders advance on ACK `0`, although Darksignal can use it for temporary
-   capacity/storage failure. Darkapple should retain refused records with
-   bounded retry and visible counters; a protocol revision can eventually
-   separate retryable refusal from permanent rejection.
+4. **Refusal needs a deliberate retention policy.** Resolved by the 3-way ack:
+   producers advance and count on `0x00` and retry on `0x02`. Darkapple keeps
+   `0x00` records in a terminal `refused` journal state as evidence with
+   visible counters (see `docs/protocol.md`).
 5. **Reuse macOS knowledge already in aftercve.** Its parsers, bounded command
    execution and coverage reporting are relevant precedents. Its batch
    collection workflow is not itself a continuous sensor scheduler.

@@ -1,9 +1,10 @@
 use darkapple::{
     Result,
     config::Config,
+    delivery,
     model::{Coverage, Observation},
     sources,
-    store::Store,
+    store::{self, Store},
     transport,
 };
 use serde_json::{Value, json};
@@ -12,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc::{self, TryRecvError},
     },
     time::{Duration, Instant},
 };
@@ -21,39 +22,73 @@ extern "C" fn stop(_: i32) {
     STOP.store(true, Ordering::Relaxed);
 }
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("darkapple: {e}");
-        std::process::exit(2);
+    match run() {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("darkapple: {e}");
+            std::process::exit(2);
+        }
     }
 }
 fn usage() -> &'static str {
-    "darkapple version | check|once|run|status|ship --config PATH | replay --config PATH --input JSONL"
+    "darkapple version | check|once|run|status|ship --config PATH | replay --config PATH --input JSONL | requeue-refused --config PATH (--event-id ID ... | --all)"
 }
-fn run() -> Result<()> {
+/// Returns the process exit code; only `ship` (see `delivery::Tally::exit_code`)
+/// and `requeue-refused` return a nonzero `Ok`.
+fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["version"] {
         println!("darkapple {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return Ok(0);
     }
     if args == ["--help"] {
         println!("{}", usage());
-        return Ok(());
+        return Ok(0);
     }
     let cmd = args.first().ok_or(usage())?;
-    if !["check", "once", "run", "status", "ship", "replay"].contains(&cmd.as_str()) {
+    if ![
+        "check",
+        "once",
+        "run",
+        "status",
+        "ship",
+        "replay",
+        "requeue-refused",
+    ]
+    .contains(&cmd.as_str())
+    {
         return Err(usage().into());
     }
+    let requeue = cmd == "requeue-refused";
     let mut config = None;
     let mut input = None;
+    let mut event_ids = Vec::new();
+    let mut all = false;
     let mut i = 1;
     while i < args.len() {
+        if args[i] == "--all" && requeue && !all {
+            all = true;
+            i += 1;
+            continue;
+        }
         let val = args.get(i + 1).ok_or(usage())?;
         match args[i].as_str() {
             "--config" if config.is_none() => config = Some(PathBuf::from(val)),
             "--input" if input.is_none() && cmd == "replay" => input = Some(PathBuf::from(val)),
+            // Count and format are validated by Store::requeue_refused.
+            "--event-id" if requeue => event_ids.push(val.clone()),
             _ => return Err(usage().into()),
         }
         i += 2;
+    }
+    // No silent mass action: name the records, or say --all, never both.
+    if requeue && (all == !event_ids.is_empty()) {
+        return Err(format!(
+            "requeue-refused requires --event-id ID (up to {}) or --all, not both",
+            store::MAX_REQUEUE_IDS
+        )
+        .into());
     }
     let c = Config::load(&config.ok_or(usage())?)?;
     if cmd == "check" {
@@ -61,14 +96,15 @@ fn run() -> Result<()> {
             "{}",
             json!({"ok":true,"host":c.host,"endpoint_helper_configured":c.endpoint_helper.is_some(),"note":"Configuration only; does not verify Apple permissions or delivery"})
         );
-        return Ok(());
+        return Ok(0);
     }
     if cmd == "status" {
         let b = darkapple::fs::read(&c.state_dir.join("status.json"), 65536, true)?;
         println!("{}", String::from_utf8(b)?);
-        return Ok(());
+        return Ok(0);
     }
     let mut store = Store::open(&c.state_dir, c.capacity)?;
+    store.set_hidden_allowlist(c.hidden_dir_allowlist.clone());
     if cmd == "replay" {
         let path = input.ok_or("replay requires --input")?;
         let bytes = darkapple::fs::read(&path, 8 * 1024 * 1024, false)?;
@@ -89,25 +125,41 @@ fn run() -> Result<()> {
         }
         status(&c, &store, &BTreeMap::new())?;
         println!("{}", store.status()?);
-        return Ok(());
+        return Ok(0);
+    }
+    if requeue {
+        // Store::open above holds the exclusive writer lock, so this refuses to
+        // run while `run`, `ship` or another writer has the state directory.
+        let (n, missing) =
+            store.requeue_refused((!all).then_some(event_ids.as_slice()), darkapple::now_ms())?;
+        status(&c, &store, &BTreeMap::new())?;
+        println!("{}", json!({"requeued":n,"not_requeued":missing}));
+        if !missing.is_empty() {
+            eprintln!(
+                "darkapple: {} event ID(s) not requeued (unknown, or not in state refused): {}",
+                missing.len(),
+                missing.join(" ")
+            );
+            return Ok(2);
+        }
+        return Ok(0);
     }
     if cmd == "ship" {
-        let mut failed = false;
-        for (id, body, a) in store.pending(darkapple::now_ms())? {
-            match transport::send(&c, &body) {
-                Ok(true) => store.acknowledge(id)?,
-                r => {
-                    store.retry(id, a, darkapple::now_ms(), matches!(r, Ok(false)))?;
-                    failed = true;
-                }
-            }
-        }
+        let tally = delivery::ship_due(&c, &store)?;
         status(&c, &store, &BTreeMap::new())?;
         println!("{}", store.status()?);
-        if failed {
-            return Err("records retained for retry; inspect status".into());
+        if tally.refused > 0 {
+            eprintln!(
+                "darkapple: ship stopped at a permanent refusal (record kept as state=refused); {} accepted, {} later due record(s) left pending and unattempted. Darksignal also refuses a wrong producer executable or uid; after fixing the cause run `darkapple requeue-refused --config PATH --all` (or --event-id ID) and ship again",
+                tally.accepted, tally.unattempted
+            );
+        } else if tally.retained > 0 {
+            eprintln!(
+                "darkapple: ship stopped at a transient failure; {} accepted, {} retained for retry, {} later due record(s) left pending and unattempted; inspect status",
+                tally.accepted, tally.retained, tally.unattempted
+            );
         }
-        return Ok(());
+        return Ok(tally.exit_code());
     }
     // Signals interrupt the collection loop; helper is reaped by Drop.
     unsafe {
@@ -142,16 +194,22 @@ fn run() -> Result<()> {
             });
     }
     let (tx, rx) = mpsc::sync_channel::<Vec<(i64, Value, u32)>>(1);
-    let (done_tx, done_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel::<Vec<(i64, u32, transport::Ack, Value)>>();
     let cfg = c.clone();
     let worker = std::thread::spawn(move || {
         while let Ok(batch) = rx.recv() {
             let mut results = Vec::new();
             for (id, body, a) in batch {
-                let outcome = transport::send(&cfg, &body).map_err(|_| ());
-                let failed = outcome.is_err();
-                results.push((id, a, outcome));
-                if failed {
+                let ack = transport::send(&cfg, &body);
+                // A refusal is per record and does not stop the batch, except for
+                // the health frame sent first: its body is always valid, so its
+                // refusal means the envelope or producer identity is refused
+                // (wrong host, uid or executable). The events then stay pending,
+                // unattempted, instead of being refused one by one.
+                let stop = matches!(ack, transport::Ack::Retry(_))
+                    || (id < 0 && ack == transport::Ack::Refused);
+                results.push((id, a, ack, body));
+                if stop {
                     break;
                 }
             }
@@ -160,26 +218,21 @@ fn run() -> Result<()> {
             }
         }
     });
+    let mut worker_lost = false;
     let mut inflight = false;
     let mut next = Instant::now();
     let mut next_ship = Instant::now();
     loop {
-        if let Ok(results) = done_rx.try_recv() {
-            for (id, a, r) in results {
-                if id < 0 {
-                    store.bump(match r {
-                        Ok(true) => "health_acknowledged",
-                        Ok(false) => "health_refused",
-                        Err(()) => "health_transport_errors",
-                    })?;
-                    continue;
-                }
-                match r {
-                    Ok(true) => store.acknowledge(id)?,
-                    r => store.retry(id, a, darkapple::now_ms(), matches!(r, Ok(false)))?,
-                }
+        match done_rx.try_recv() {
+            Ok(results) => {
+                settle_all(&store, results)?;
+                inflight = false;
             }
-            inflight = false;
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                worker_lost = true;
+                break;
+            }
         }
         if let Some(n) = &mut native {
             let (events, health) = n.drain();
@@ -238,7 +291,10 @@ fn run() -> Result<()> {
                 0,
             )];
             batch.extend(store.pending(darkapple::now_ms())?);
-            tx.send(batch)?;
+            if tx.send(batch).is_err() {
+                worker_lost = true;
+                break;
+            }
             inflight = true;
             next_ship = Instant::now() + Duration::from_secs(10);
         }
@@ -248,19 +304,37 @@ fn run() -> Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
     drop(tx);
-    let _ = worker.join();
+    let joined = delivery::join_worker(worker);
     // Consume final ACKs before exiting; a crash before this commit safely replays.
-    if let Ok(results) = done_rx.try_recv() {
-        for (id, a, r) in results {
-            if id >= 0 {
-                match r {
-                    Ok(true) => store.acknowledge(id)?,
-                    r => store.retry(id, a, darkapple::now_ms(), matches!(r, Ok(false)))?,
-                }
-            }
-        }
+    while let Ok(results) = done_rx.try_recv() {
+        settle_all(&store, results)?;
+    }
+    let failure = match joined {
+        Err(e) => Some(e.to_string()),
+        Ok(()) if worker_lost => Some("delivery worker stopped unexpectedly".to_string()),
+        Ok(()) => None,
+    };
+    if let Some(why) = &failure {
+        store.bump("worker_failures")?;
+        coverage.insert(
+            "delivery".into(),
+            Coverage::new("delivery", "unavailable", why),
+        );
     }
     status(&c, &store, &coverage)?;
+    match failure {
+        Some(why) => Err(why.into()),
+        None => Ok(0),
+    }
+}
+fn settle_all(store: &Store, results: Vec<(i64, u32, transport::Ack, Value)>) -> Result<()> {
+    for (id, a, ack, body) in results {
+        if id < 0 {
+            delivery::settle_health(store, &ack)?;
+        } else {
+            delivery::settle(store, id, a, &ack, &body)?;
+        }
+    }
     Ok(())
 }
 fn status(c: &Config, s: &Store, coverage: &BTreeMap<String, Coverage>) -> Result<()> {

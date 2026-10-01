@@ -77,15 +77,34 @@ impl Observation {
             self.path.as_deref().unwrap_or("")
         )
     }
-    pub fn fingerprint(&self) -> String {
+    /// Content fingerprint for baseline comparison. A serialization failure is
+    /// an error, never the digest of empty input: an empty fallback would give
+    /// every failing observation the same fingerprint and hide changes.
+    pub fn fingerprint(&self) -> Result<String> {
         let mut copy = self.clone();
         copy.observed_at_ms = 0;
-        hex::encode(Sha256::digest(
-            serde_json::to_vec(&copy).unwrap_or_default(),
-        ))
+        digest(&copy)
     }
 }
-pub fn detection(o: &Observation, changed: bool) -> Option<Event> {
+fn digest<T: Serialize>(v: &T) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(v)?)))
+}
+/// True when the first hidden component of `exe` is an allowlisted toolchain
+/// directory directly under `/Users/<name>/` (not `/Users/Shared`) and no later
+/// component is hidden.
+fn allowed_hidden(exe: &str, allow: &[String]) -> bool {
+    let parts: Vec<&str> = exe.split('/').collect();
+    let hidden = |p: &&str| p.starts_with('.') && p.len() > 1;
+    let [_, "Users", user, dir, rest @ ..] = parts.as_slice() else {
+        return false;
+    };
+    !user.is_empty()
+        && !user.starts_with('.')
+        && *user != "Shared"
+        && allow.iter().any(|a| a == dir)
+        && !rest.iter().any(hidden)
+}
+pub fn detection(o: &Observation, changed: bool, hidden_allow: &[String]) -> Option<Event> {
     let (rule, severity, summary) = match o.kind.as_str() {
         "process.observed" | "process.exec"
             if o.exe.as_deref().is_some_and(|s| {
@@ -102,9 +121,10 @@ pub fn detection(o: &Observation, changed: bool) -> Option<Event> {
             )
         }
         "process.observed" | "process.exec"
-            if o.exe
-                .as_deref()
-                .is_some_and(|s| s.split('/').any(|p| p.starts_with('.') && p.len() > 1)) =>
+            if o.exe.as_deref().is_some_and(|s| {
+                s.split('/').any(|p| p.starts_with('.') && p.len() > 1)
+                    && !allowed_hidden(s, hidden_allow)
+            }) =>
         {
             (
                 "macos.process.hidden_executable",
@@ -152,4 +172,19 @@ pub fn detection(o: &Observation, changed: bool) -> Option<Event> {
         exe: o.exe.clone(),
         path: o.path.clone(),
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    #[test]
+    fn digest_failure_is_an_error_not_an_empty_fingerprint() {
+        // serde_json refuses non-string map keys; this must fail closed.
+        let bad: HashMap<(u8, u8), u8> = [((1, 2), 3)].into();
+        assert!(digest(&bad).is_err());
+        let o = crate::sources::observation("process", "process.observed", "present".into());
+        let fp = o.fingerprint().unwrap();
+        assert_ne!(fp, hex::encode(Sha256::digest(b"")));
+        assert_eq!(fp.len(), 64);
+    }
 }

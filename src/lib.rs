@@ -1,4 +1,5 @@
 pub mod config;
+pub mod delivery;
 pub mod fs;
 pub mod model;
 pub mod native;
