@@ -1,0 +1,3 @@
+{"source":"process","kind":"process.observed","observed_at_ms":1780000000000,"pid":4242,"start_us":1234567,"exe":"/opt/.cache/example","value":"present"}
+{"source":"launchd","kind":"launchd.file","observed_at_ms":1780000000000,"path":"/Library/LaunchDaemons/com.example.worker.plist","value":"first-hash"}
+{"source":"launchd","kind":"launchd.file","observed_at_ms":1780000001000,"path":"/Library/LaunchDaemons/com.example.worker.plist","value":"changed-hash"}

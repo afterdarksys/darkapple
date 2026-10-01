@@ -1,0 +1,11 @@
+{
+  "mode": "host",
+  "host": "mac1",
+  "socket": "/Library/Application Support/Darkapple/ipc/darksignal.sock",
+  "state_dir": "/Library/Application Support/Darkapple/darksignal",
+  "api_url": "https://darkapi.io",
+  "api_key_file": "/Library/Application Support/Darkapple/api.key",
+  "producers": {
+    "darkapple": {"exe": "/Applications/Darkapple.app/Contents/MacOS/darkappled", "uid": 0}
+  }
+}

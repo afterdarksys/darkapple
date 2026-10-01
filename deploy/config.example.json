@@ -1,0 +1,10 @@
+{
+  "host": "mac1",
+  "state_dir": "/Library/Application Support/Darkapple/state",
+  "darksignal_socket": "/Library/Application Support/Darkapple/ipc/darksignal.sock",
+  "interval_seconds": 30,
+  "capacity": 10000,
+  "retention_days": 7,
+  "endpoint_helper": "/Applications/Darkapple.app/Contents/Helpers/EndpointSensor.app/Contents/MacOS/EndpointSensor",
+  "launch_dirs": ["/Library/LaunchAgents", "/Library/LaunchDaemons"]
+}
