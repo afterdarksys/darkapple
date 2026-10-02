@@ -71,7 +71,8 @@ deduplication and the outgoing HTTP payload. It never uses the configured
 production API or its credentials. `scripts/test-swift.sh` typechecks the Swift
 sources and runs the helper's output-loss test without Endpoint Security.
 CI (`.github/workflows/ci.yml`) runs formatting, Clippy, tests, cargo-deny,
-gitleaks and the Swift check on macOS.
+gitleaks and the Swift check on macOS. The release binary embeds its crate list
+with cargo-auditable 0.7.6 (`cargo auditable build --locked --release`). `cargo audit bin` reads that list.
 
 `build/Darkapple.app` is an ad-hoc-signed development bundle. It contains
 `darkappled` (the CLI is named `darkapple` outside the app), `darksignal`, the Swift application, the embedded EndpointSensor

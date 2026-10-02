@@ -29,6 +29,14 @@ jobs:
         run: rustup run 1.97.1 cargo test --locked
       - name: Swift typecheck and Endpoint Security-free output test (no signing)
         run: bash scripts/test-swift.sh
+      - name: Install pinned cargo-auditable
+        run: |
+          rustup run 1.97.1 cargo install cargo-auditable --version 0.7.6 --locked
+          rustup run 1.97.1 cargo install rust-audit-info --version 0.5.4 --locked
+      - name: Release build
+        run: rustup run 1.97.1 cargo auditable build --locked --release
+      - name: Confirm the embedded crate list
+        run: bash scripts/auditable-root.sh darkapple target/release/darkapple
 
   dependency-policy:
     runs-on: macos-15

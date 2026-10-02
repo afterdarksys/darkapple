@@ -111,6 +111,10 @@ precede enabling active response. The current release remains observational.
 
 ## Maintenance
 
+- [x] The macOS release step embeds the locked crate list with cargo-auditable
+  0.7.6 and checks that `darkapple` is the root package. The ad-hoc
+  `Darkapple.app` bundle is unchanged. `cargo audit bin` is the operator
+  command, not the CI gate.
 - [ ] Automate dependency/security checks and reproducible release artifacts.
 - [ ] Establish supported release branches, patch policy and a verified private
   vulnerability-reporting channel for the public repository.
